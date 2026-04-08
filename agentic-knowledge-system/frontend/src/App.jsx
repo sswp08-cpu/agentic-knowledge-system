@@ -27,6 +27,106 @@ const AGENT_CONFIG = {
   'Validator Agent': { icon: CheckCircle, color: 'agent-validator', label: 'Validate' },
 };
 
+// Component to render markdown with clickable [[wiki-links]]
+function WikiLinkedMarkdown({ content, onLinkClick }) {
+  if (!content) return null;
+  
+  // Pre-process content to convert [[wiki-links]] to clickable spans
+  // We'll render as HTML since ReactMarkdown doesn't handle custom syntax well
+  const processWikiLinks = (text) => {
+    const parts = [];
+    let lastIndex = 0;
+    const regex = /\[\[([^\]]+)\]\]/g;
+    let match;
+    
+    while ((match = regex.exec(text)) !== null) {
+      // Add text before the match
+      if (match.index > lastIndex) {
+        parts.push(text.slice(lastIndex, match.index));
+      }
+      
+      // Add the wiki-link as a special marker
+      const topic = match[1];
+      parts.push(`<<WIKILINK:${topic}>>`);
+      lastIndex = regex.lastIndex;
+    }
+    
+    // Add remaining text
+    if (lastIndex < text.length) {
+      parts.push(text.slice(lastIndex));
+    }
+    
+    return parts.join('');
+  };
+  
+  const processedContent = processWikiLinks(content);
+  
+  // Custom component to handle text nodes
+  const renderWithLinks = (text) => {
+    if (typeof text !== 'string') return text;
+    
+    const parts = text.split(/(<<WIKILINK:[^>]+>>)/g);
+    return parts.map((part, i) => {
+      const match = part.match(/<<WIKILINK:([^>]+)>>/);
+      if (match) {
+        const topic = match[1];
+        const filename = topic.toLowerCase().replace(/\s+/g, '_');
+        return (
+          <span
+            key={i}
+            className="wiki-link"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onLinkClick(filename);
+            }}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onLinkClick(filename);
+              }
+            }}
+          >
+            {topic}
+          </span>
+        );
+      }
+      return part;
+    });
+  };
+  
+  // Create custom components for ReactMarkdown that process wiki-links
+  const components = {
+    p: ({ children }) => <p>{processChildren(children)}</p>,
+    li: ({ children }) => <li>{processChildren(children)}</li>,
+    h1: ({ children }) => <h1>{processChildren(children)}</h1>,
+    h2: ({ children }) => <h2>{processChildren(children)}</h2>,
+    h3: ({ children }) => <h3>{processChildren(children)}</h3>,
+    h4: ({ children }) => <h4>{processChildren(children)}</h4>,
+    strong: ({ children }) => <strong>{processChildren(children)}</strong>,
+    em: ({ children }) => <em>{processChildren(children)}</em>,
+    td: ({ children }) => <td>{processChildren(children)}</td>,
+    th: ({ children }) => <th>{processChildren(children)}</th>,
+  };
+  
+  function processChildren(children) {
+    return React.Children.map(children, (child) => {
+      if (typeof child === 'string') {
+        return renderWithLinks(child);
+      }
+      return child;
+    });
+  }
+  
+  return (
+    <ReactMarkdown components={components}>
+      {processedContent}
+    </ReactMarkdown>
+  );
+}
+
 function App() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
@@ -293,40 +393,10 @@ function App() {
 
                 {/* Main Response */}
                 <div className="bg-obsidian-900 rounded-xl border border-obsidian-700 p-6 markdown-content">
-                  <ReactMarkdown
-                    components={{
-                      // Custom renderer for wiki links
-                      p: ({ children }) => {
-                        const processChildren = (child) => {
-                          if (typeof child === 'string') {
-                            const parts = child.split(/(\[\[[^\]]+\]\])/g);
-                            return parts.map((part, i) => {
-                              const match = part.match(/\[\[([^\]]+)\]\]/);
-                              if (match) {
-                                const topic = match[1];
-                                const filename = topic.toLowerCase().replace(/\s+/g, '_');
-                                return (
-                                  <span 
-                                    key={i}
-                                    className="wiki-link"
-                                    onClick={() => fetchFileContent(filename)}
-                                  >
-                                    {topic}
-                                  </span>
-                                );
-                              }
-                              return part;
-                            });
-                          }
-                          return child;
-                        };
-                        
-                        return <p>{React.Children.map(children, processChildren)}</p>;
-                      }
-                    }}
-                  >
-                    {result.response}
-                  </ReactMarkdown>
+                  <WikiLinkedMarkdown 
+                    content={result.response} 
+                    onLinkClick={fetchFileContent}
+                  />
                 </div>
 
                 {/* Validation Score */}
@@ -367,38 +437,10 @@ function App() {
                   </button>
                 </div>
                 <div className="p-6 markdown-content max-h-96 overflow-y-auto">
-                  <ReactMarkdown
-                    components={{
-                      p: ({ children }) => {
-                        const processChildren = (child) => {
-                          if (typeof child === 'string') {
-                            const parts = child.split(/(\[\[[^\]]+\]\])/g);
-                            return parts.map((part, i) => {
-                              const match = part.match(/\[\[([^\]]+)\]\]/);
-                              if (match) {
-                                const topic = match[1];
-                                const filename = topic.toLowerCase().replace(/\s+/g, '_');
-                                return (
-                                  <span 
-                                    key={i}
-                                    className="wiki-link"
-                                    onClick={() => fetchFileContent(filename)}
-                                  >
-                                    {topic}
-                                  </span>
-                                );
-                              }
-                              return part;
-                            });
-                          }
-                          return child;
-                        };
-                        return <p>{React.Children.map(children, processChildren)}</p>;
-                      }
-                    }}
-                  >
-                    {fileContent}
-                  </ReactMarkdown>
+                  <WikiLinkedMarkdown 
+                    content={fileContent} 
+                    onLinkClick={fetchFileContent}
+                  />
                 </div>
               </div>
             )}
