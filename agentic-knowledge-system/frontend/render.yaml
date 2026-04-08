@@ -1,0 +1,11 @@
+# Render Static Site Configuration for Frontend
+# Deploy as: Static Site
+# Root Directory: frontend
+# Build Command: npm install && npm run build
+# Publish Directory: dist
+
+# Rewrite rules for SPA
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

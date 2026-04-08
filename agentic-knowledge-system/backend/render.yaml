@@ -1,0 +1,19 @@
+# Render Web Service Configuration
+# Deploy as: Web Service
+# Build Command: pip install -r requirements.txt
+# Start Command: uvicorn main:app --host 0.0.0.0 --port $PORT
+
+services:
+  - type: web
+    name: agentic-knowledge-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    healthCheckPath: /health
+    autoDeploy: true

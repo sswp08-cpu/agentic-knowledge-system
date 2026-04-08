@@ -1,0 +1,405 @@
+"""
+Agentic Knowledge System - Multi-Agent LangGraph Implementation
+"""
+
+import os
+import re
+import json
+from pathlib import Path
+from typing import TypedDict, List, Optional
+from langgraph.graph import StateGraph, END
+from langchain_groq import ChatGroq
+from langchain_core.messages import HumanMessage, SystemMessage
+
+# Initialize Groq LLM
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0.7,
+    api_key=os.getenv("GROQ_API_KEY")
+)
+
+# Knowledge base path
+KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
+KNOWLEDGE_DIR.mkdir(exist_ok=True)
+
+
+# State definition
+class AgentState(TypedDict):
+    query: str
+    existing_knowledge: List[dict]
+    research_findings: str
+    summary: str
+    new_content: str
+    linked_content: str
+    validation_result: dict
+    final_output: str
+    agents_used: List[str]
+    files_created: List[str]
+    files_updated: List[str]
+
+
+def read_knowledge_base() -> List[dict]:
+    """Read all markdown files from knowledge directory"""
+    knowledge = []
+    if KNOWLEDGE_DIR.exists():
+        for md_file in KNOWLEDGE_DIR.glob("*.md"):
+            content = md_file.read_text(encoding="utf-8")
+            knowledge.append({
+                "filename": md_file.stem,
+                "content": content,
+                "path": str(md_file)
+            })
+    return knowledge
+
+
+def extract_topics(text: str) -> List[str]:
+    """Extract [[wiki-link]] topics from text"""
+    return re.findall(r'\[\[([^\]]+)\]\]', text)
+
+
+def filename_from_topic(topic: str) -> str:
+    """Convert topic to filename"""
+    return topic.lower().replace(" ", "_").replace("-", "_") + ".md"
+
+
+# Agent 1: Research Agent
+def research_agent(state: AgentState) -> AgentState:
+    """Searches existing knowledge files for relevant information"""
+    
+    query = state["query"]
+    knowledge = read_knowledge_base()
+    state["existing_knowledge"] = knowledge
+    
+    if not knowledge:
+        state["research_findings"] = "No existing knowledge found. This will be a new topic."
+        state["agents_used"] = state.get("agents_used", []) + ["Research Agent"]
+        return state
+    
+    # Build context from existing files
+    context = "\n\n---\n\n".join([
+        f"## {k['filename']}\n{k['content']}" 
+        for k in knowledge
+    ])
+    
+    prompt = f"""You are a Research Agent. Your task is to find relevant information from the existing knowledge base.
+
+USER QUERY: {query}
+
+EXISTING KNOWLEDGE BASE:
+{context}
+
+Instructions:
+1. Identify which existing notes are relevant to the query
+2. Extract key facts and connections
+3. Note any gaps in current knowledge
+4. Identify related topics that could be linked
+
+Provide a structured research summary."""
+
+    response = llm.invoke([
+        SystemMessage(content="You are a precise research agent that analyzes existing knowledge."),
+        HumanMessage(content=prompt)
+    ])
+    
+    state["research_findings"] = response.content
+    state["agents_used"] = state.get("agents_used", []) + ["Research Agent"]
+    return state
+
+
+# Agent 2: Summarizer Agent
+def summarizer_agent(state: AgentState) -> AgentState:
+    """Condenses research findings into key points"""
+    
+    prompt = f"""You are a Summarizer Agent. Condense the research findings into clear, structured key points.
+
+USER QUERY: {state['query']}
+
+RESEARCH FINDINGS:
+{state['research_findings']}
+
+Instructions:
+1. Extract the most important facts (bullet points)
+2. Identify the core concepts that need to be explained
+3. Note relationships between concepts
+4. Keep it concise but comprehensive
+
+Output a structured summary."""
+
+    response = llm.invoke([
+        SystemMessage(content="You are a concise summarizer that extracts key insights."),
+        HumanMessage(content=prompt)
+    ])
+    
+    state["summary"] = response.content
+    state["agents_used"] = state.get("agents_used", []) + ["Summarizer Agent"]
+    return state
+
+
+# Agent 3: Writer Agent
+def writer_agent(state: AgentState) -> AgentState:
+    """Generates new markdown content for the knowledge base"""
+    
+    existing_topics = [k['filename'] for k in state.get('existing_knowledge', [])]
+    
+    prompt = f"""You are a Writer Agent. Create a well-structured markdown note for the knowledge base.
+
+USER QUERY: {state['query']}
+
+SUMMARY OF FINDINGS:
+{state['summary']}
+
+EXISTING TOPICS IN KNOWLEDGE BASE:
+{existing_topics}
+
+Instructions:
+1. Write a comprehensive markdown note about the main topic
+2. Use clear headings (##, ###)
+3. Include key concepts, definitions, and explanations
+4. Mark related topics with [[Topic Name]] wiki-link syntax
+5. For existing topics, use their exact names: {existing_topics}
+6. For new related topics, suggest them with [[New Topic]]
+7. Include a "Related Topics" section at the end
+
+Format:
+# Topic Title
+
+Brief introduction...
+
+## Key Concepts
+...
+
+## Details
+...
+
+## Related Topics
+- [[Related Topic 1]]
+- [[Related Topic 2]]
+
+---
+*Generated by Agentic Knowledge System*
+"""
+
+    response = llm.invoke([
+        SystemMessage(content="You are a technical writer creating structured knowledge notes."),
+        HumanMessage(content=prompt)
+    ])
+    
+    state["new_content"] = response.content
+    state["agents_used"] = state.get("agents_used", []) + ["Writer Agent"]
+    return state
+
+
+# Agent 4: Linker Agent
+def linker_agent(state: AgentState) -> AgentState:
+    """Creates and validates wiki-style links between topics"""
+    
+    content = state["new_content"]
+    existing_topics = [k['filename'] for k in state.get('existing_knowledge', [])]
+    
+    # Extract all [[links]] from new content
+    links = extract_topics(content)
+    
+    prompt = f"""You are a Linker Agent. Your job is to enhance the content with proper wiki-links and ensure connection coherence.
+
+CONTENT TO PROCESS:
+{content}
+
+EXISTING TOPICS: {existing_topics}
+LINKS FOUND IN CONTENT: {links}
+
+Instructions:
+1. Verify all [[links]] point to valid or suggested topics
+2. Add any missing links to related concepts mentioned in text
+3. Ensure bidirectional linking is possible (note which existing files should link back)
+4. Output the enhanced content with proper [[wiki-links]]
+5. Also output a JSON block with linking recommendations:
+
+After the content, add:
+<!--LINK_META
+{{
+    "new_links": ["topic1", "topic2"],
+    "backlinks_needed": {{"existing_topic": ["new_topic"]}}
+}}
+-->
+
+Output the full enhanced markdown content."""
+
+    response = llm.invoke([
+        SystemMessage(content="You are a linking specialist ensuring knowledge graph coherence."),
+        HumanMessage(content=prompt)
+    ])
+    
+    state["linked_content"] = response.content
+    state["agents_used"] = state.get("agents_used", []) + ["Linker Agent"]
+    return state
+
+
+# Agent 5: Validator Agent
+def validator_agent(state: AgentState) -> AgentState:
+    """Validates structure, completeness, and saves to knowledge base"""
+    
+    content = state["linked_content"]
+    query = state["query"]
+    
+    prompt = f"""You are a Validator Agent. Check the content quality and structure.
+
+ORIGINAL QUERY: {query}
+
+CONTENT TO VALIDATE:
+{content}
+
+Validation Checklist:
+1. Does it answer the original query?
+2. Is the markdown structure valid?
+3. Are there proper headings?
+4. Are wiki-links properly formatted [[Like This]]?
+5. Is there a Related Topics section?
+6. Is the content factually reasonable?
+
+Output a JSON validation report:
+{{
+    "is_valid": true/false,
+    "quality_score": 1-10,
+    "issues": ["issue1", "issue2"],
+    "suggestions": ["suggestion1"],
+    "approved_for_save": true/false
+}}
+
+Only output the JSON, nothing else."""
+
+    response = llm.invoke([
+        SystemMessage(content="You are a strict validator. Output only valid JSON."),
+        HumanMessage(content=prompt)
+    ])
+    
+    # Parse validation result
+    try:
+        # Clean up response to extract JSON
+        json_str = response.content.strip()
+        if json_str.startswith("```"):
+            json_str = json_str.split("```")[1]
+            if json_str.startswith("json"):
+                json_str = json_str[4:]
+        validation = json.loads(json_str.strip())
+    except:
+        validation = {
+            "is_valid": True,
+            "quality_score": 7,
+            "issues": [],
+            "suggestions": [],
+            "approved_for_save": True
+        }
+    
+    state["validation_result"] = validation
+    state["agents_used"] = state.get("agents_used", []) + ["Validator Agent"]
+    
+    # Save to knowledge base if approved
+    files_created = []
+    files_updated = []
+    
+    if validation.get("approved_for_save", True):
+        # Extract topic name from content or query
+        topic = state["query"].lower().replace(" ", "_").replace("?", "").replace("!", "")
+        topic = re.sub(r'[^a-z0-9_]', '', topic)[:50]
+        
+        # Clean content (remove meta comments for storage)
+        clean_content = re.sub(r'<!--LINK_META.*?-->', '', content, flags=re.DOTALL).strip()
+        
+        filepath = KNOWLEDGE_DIR / f"{topic}.md"
+        
+        if filepath.exists():
+            files_updated.append(topic)
+        else:
+            files_created.append(topic)
+        
+        filepath.write_text(clean_content, encoding="utf-8")
+    
+    state["files_created"] = files_created
+    state["files_updated"] = files_updated
+    
+    return state
+
+
+# Final output formatter
+def format_output(state: AgentState) -> AgentState:
+    """Formats the final response for the user"""
+    
+    # Clean content for display
+    content = state.get("linked_content", state.get("new_content", ""))
+    content = re.sub(r'<!--LINK_META.*?-->', '', content, flags=re.DOTALL).strip()
+    
+    output = {
+        "response": content,
+        "agents_used": state.get("agents_used", []),
+        "files_created": state.get("files_created", []),
+        "files_updated": state.get("files_updated", []),
+        "validation": state.get("validation_result", {}),
+        "existing_knowledge_count": len(state.get("existing_knowledge", []))
+    }
+    
+    state["final_output"] = json.dumps(output)
+    return state
+
+
+# Build the LangGraph workflow
+def create_workflow():
+    """Creates the multi-agent workflow graph"""
+    
+    workflow = StateGraph(AgentState)
+    
+    # Add nodes (agents)
+    workflow.add_node("research", research_agent)
+    workflow.add_node("summarize", summarizer_agent)
+    workflow.add_node("write", writer_agent)
+    workflow.add_node("link", linker_agent)
+    workflow.add_node("validate", validator_agent)
+    workflow.add_node("format", format_output)
+    
+    # Define edges (workflow)
+    workflow.set_entry_point("research")
+    workflow.add_edge("research", "summarize")
+    workflow.add_edge("summarize", "write")
+    workflow.add_edge("write", "link")
+    workflow.add_edge("link", "validate")
+    workflow.add_edge("validate", "format")
+    workflow.add_edge("format", END)
+    
+    return workflow.compile()
+
+
+# Main execution function
+def process_query(query: str) -> dict:
+    """Process a user query through the agent pipeline"""
+    
+    workflow = create_workflow()
+    
+    initial_state = {
+        "query": query,
+        "existing_knowledge": [],
+        "research_findings": "",
+        "summary": "",
+        "new_content": "",
+        "linked_content": "",
+        "validation_result": {},
+        "final_output": "",
+        "agents_used": [],
+        "files_created": [],
+        "files_updated": []
+    }
+    
+    result = workflow.invoke(initial_state)
+    
+    return json.loads(result["final_output"])
+
+
+def get_all_knowledge() -> List[dict]:
+    """Get all knowledge files"""
+    return read_knowledge_base()
+
+
+def get_knowledge_file(topic: str) -> Optional[str]:
+    """Get a specific knowledge file content"""
+    filepath = KNOWLEDGE_DIR / f"{topic}.md"
+    if filepath.exists():
+        return filepath.read_text(encoding="utf-8")
+    return None
